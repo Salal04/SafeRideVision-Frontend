@@ -20,7 +20,7 @@ export function saveApiBase(url) {
   }
 }
 
-function normalizeBase(url) {
+export function normalizeBase(url) {
   return url.trim().replace(/\/+$/, '')
 }
 
@@ -29,7 +29,7 @@ function normalizeBase(url) {
 // one place that turns either shape into something a browser can actually
 // fetch, so every consumer (video, csv link, bike photo, plate crop) resolves
 // the same way instead of each screen reinventing it slightly differently.
-function resolveUrl(base, path) {
+export function resolveUrl(base, path) {
   if (!path) return null
   return /^https?:\/\//i.test(path) ? path : `${base}${path.startsWith('/') ? '' : '/'}${path}`
 }
@@ -37,7 +37,7 @@ function resolveUrl(base, path) {
 // `bikes` (new, richer field) falls back to deriving the same shape from the
 // older `logs` field, so a backend that hasn't been updated yet still gets a
 // usable — just image-less — dossier per bike instead of nothing.
-function normalizeBikes(data, base) {
+export function normalizeBikes(data, base) {
   const source = Array.isArray(data.bikes)
     ? data.bikes
     : Array.isArray(data.logs)
@@ -63,7 +63,7 @@ function normalizeBikes(data, base) {
   })
 }
 
-function normalizeSummary(data, bikes) {
+export function normalizeSummary(data, bikes) {
   if (data.summary) return data.summary
   // Same fallback spirit as normalizeBikes(): an older backend without a
   // `summary` block still gets one, computed client-side from `bikes`.
