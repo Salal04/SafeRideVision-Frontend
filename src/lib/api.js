@@ -46,14 +46,20 @@ export function normalizeBikes(data, base) {
 
   return source.map((row) => {
     const toBool = (v) => v === true || String(v).trim().toLowerCase() === 'true'
-    const everTurned = toBool(row.ever_turned)
-    const signaled = toBool(row.ever_signaled_while_turning)
+    // Supports both naming conventions: the enriched `bikes` shape (track_id,
+    // ever_turned, ...) AND the raw `logs` fallback, whose keys are whatever
+    // the CSV header literally says (bike_id, took_turn, has_both_mirrors,
+    // has_both_indicators, indicator_on_while_turning) — see
+    // backend_server.py's _bike_case_files() for why those two differ.
+    const rawTrackId = row.track_id ?? row.bike_id
+    const everTurned = toBool(row.ever_turned ?? row.took_turn)
+    const signaled = toBool(row.ever_signaled_while_turning ?? row.indicator_on_while_turning)
     return {
-      trackId: row.track_id,
+      trackId: rawTrackId,
       plateNumber: (row.plate_number || '').trim(),
       plateDetected: toBool(row.plate_detected),
-      mirrorSeenBoth: toBool(row.mirror_seen_both),
-      indicatorSeenBoth: toBool(row.indicator_seen_both),
+      mirrorSeenBoth: toBool(row.mirror_seen_both ?? row.has_both_mirrors),
+      indicatorSeenBoth: toBool(row.indicator_seen_both ?? row.has_both_indicators),
       everTurned,
       signaled,
       violation: row.violation != null ? Boolean(row.violation) : everTurned && !signaled,
