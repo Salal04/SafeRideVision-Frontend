@@ -58,7 +58,7 @@ function useNgrokImage(src) {
   return { blobUrl, status }
 }
 
-function Frame({ src, alt, empty, className = '' }) {
+export function Frame({ src, alt, empty, className = '' }) {
   const { blobUrl, status } = useNgrokImage(src)
 
   if (status === 'empty') {
@@ -90,7 +90,7 @@ function Frame({ src, alt, empty, className = '' }) {
 // The plate itself, rendered like an ANPR readout (glowing mono digits on
 // black) rather than a literal license-plate graphic — matches the app's
 // HUD language instead of looking like clip art.
-function PlateReadout({ plateNumber, plateDetected }) {
+export function PlateReadout({ plateNumber, plateDetected }) {
   if (plateNumber) {
     return (
       <div className="rounded-md border border-cyan/30 bg-black/60 px-3 py-2 flex items-center justify-between gap-2">
@@ -111,7 +111,7 @@ function PlateReadout({ plateNumber, plateDetected }) {
   )
 }
 
-function VerdictRibbon({ everTurned, violation }) {
+export function VerdictRibbon({ everTurned, violation }) {
   if (!everTurned) {
     return (
       <span className="inline-flex items-center gap-1 rounded-full border border-line-soft bg-panel-2/80 px-2 py-0.5 font-mono text-[10px] text-muted-2">
@@ -133,7 +133,7 @@ function VerdictRibbon({ everTurned, violation }) {
   )
 }
 
-function Pill({ ok, label }) {
+export function Pill({ ok, label }) {
   return (
     <span
       className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-mono text-[10px] ${
@@ -145,7 +145,7 @@ function Pill({ ok, label }) {
   )
 }
 
-function StatCard({ icon: Icon, label, value, tone }) {
+export function StatCard({ icon: Icon, label, value, tone }) {
   const toneCls = {
     cyan: 'text-cyan border-cyan/25',
     amber: 'text-amber border-amber/25',
@@ -165,7 +165,7 @@ function StatCard({ icon: Icon, label, value, tone }) {
   )
 }
 
-function DossierCard({ bike, onOpen }) {
+export function DossierCard({ bike, onOpen }) {
   return (
     <motion.button
       layout
@@ -204,7 +204,7 @@ function DossierCard({ bike, onOpen }) {
   )
 }
 
-function CopyButton({ text }) {
+export function CopyButton({ text }) {
   const [copied, setCopied] = useState(false)
   if (!text) return null
   return (
@@ -226,7 +226,7 @@ function CopyButton({ text }) {
   )
 }
 
-function DossierModal({ bike, onClose }) {
+export function DossierModal({ bike, onClose }) {
   if (!bike) return null
   return (
     <AnimatePresence>
@@ -298,7 +298,7 @@ function DossierModal({ bike, onClose }) {
   )
 }
 
-const FILTERS = [
+export const FILTERS = [
   { id: 'all', label: 'All' },
   { id: 'violation', label: 'Violations' },
   { id: 'signaled', label: 'Signaled correctly' },
@@ -308,7 +308,7 @@ const FILTERS = [
 // Same "fetch with the ngrok header, then trigger a real download" pattern
 // as the video download link in Upload.jsx — a plain <a href> would hit the
 // ngrok interstitial instead of the CSV bytes.
-async function downloadCsv(url, filename) {
+export async function downloadCsv(url, filename) {
   try {
     const res = await fetch(url, { headers: { 'ngrok-skip-browser-warning': 'true' } })
     const blob = await res.blob()
@@ -323,7 +323,9 @@ async function downloadCsv(url, filename) {
   }
 }
 
-export default function BikeDossierPanel({ bikes = [], summary, csvDownloadUrl }) {
+// The filterable card grid + click-to-open modal, pulled out so it can be
+// reused as one tab inside VideoAnalysisDetail.jsx as well as standalone.
+export function BikeGallery({ bikes = [] }) {
   const [filter, setFilter] = useState('all')
   const [active, setActive] = useState(null)
 
@@ -334,6 +336,40 @@ export default function BikeDossierPanel({ bikes = [], summary, csvDownloadUrl }
     return true
   })
 
+  return (
+    <div>
+      <div className="flex flex-wrap gap-2 mb-4">
+        {FILTERS.map((f) => (
+          <button
+            key={f.id}
+            onClick={() => setFilter(f.id)}
+            className={`font-mono text-[11px] px-3 py-1.5 rounded-full border transition-colors ${
+              filter === f.id
+                ? 'border-cyan/50 text-cyan bg-cyan/10'
+                : 'border-line-soft text-muted-2 hover:text-muted'
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      {filtered.length === 0 ? (
+        <p className="text-sm text-muted text-center py-10">No bikes match this filter.</p>
+      ) : (
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {filtered.map((bike) => (
+            <DossierCard key={bike.trackId} bike={bike} onOpen={setActive} />
+          ))}
+        </div>
+      )}
+
+      {active && <DossierModal bike={active} onClose={() => setActive(null)} />}
+    </div>
+  )
+}
+
+export default function BikeDossierPanel({ bikes = [], summary, csvDownloadUrl }) {
   const s = summary || {}
 
   return (
@@ -361,36 +397,9 @@ export default function BikeDossierPanel({ bikes = [], summary, csvDownloadUrl }
         <StatCard icon={ScanLine} label="Plates read" value={s.plates_read ?? 0} tone="green" />
       </div>
 
-      {/* Filter chips */}
-      <div className="px-5 pt-4 flex flex-wrap gap-2">
-        {FILTERS.map((f) => (
-          <button
-            key={f.id}
-            onClick={() => setFilter(f.id)}
-            className={`font-mono text-[11px] px-3 py-1.5 rounded-full border transition-colors ${
-              filter === f.id
-                ? 'border-cyan/50 text-cyan bg-cyan/10'
-                : 'border-line-soft text-muted-2 hover:text-muted'
-            }`}
-          >
-            {f.label}
-          </button>
-        ))}
-      </div>
-
       <div className="p-5">
-        {filtered.length === 0 ? (
-          <p className="text-sm text-muted text-center py-10">No bikes match this filter.</p>
-        ) : (
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {filtered.map((bike) => (
-              <DossierCard key={bike.trackId} bike={bike} onOpen={setActive} />
-            ))}
-          </div>
-        )}
+        <BikeGallery bikes={bikes} />
       </div>
-
-      {active && <DossierModal bike={active} onClose={() => setActive(null)} />}
     </div>
   )
 }
