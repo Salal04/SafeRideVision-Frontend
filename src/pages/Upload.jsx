@@ -8,6 +8,7 @@ import {
   ListVideo, ArrowUpDown, RefreshCw,
 } from 'lucide-react'
 import { getSavedApiBase, saveApiBase, runDetection } from '../lib/api.js'
+import BikeDossierPanel from '../components/BikeDossier.jsx'
 
 const BASE_PIPELINE_STEPS = [
   'Extracting frames',
@@ -1206,44 +1207,48 @@ export default function Upload() {
               )}
             </div>
 
-            <div className="rounded-xl panel-border bg-panel overflow-hidden">
-              <div className="px-5 py-4 border-b border-line-soft font-mono text-sm flex items-center justify-between">
-                <span>Detection log</span>
-                <span className="text-muted-2 text-xs">{logs.length} {logs.length === 1 ? 'entry' : 'entries'}</span>
-              </div>
-              {logs.length === 0 ? (
-                <p className="px-5 py-8 text-sm text-muted text-center">
-                  No structured logs were returned for this run.
-                </p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm font-mono">
-                    <thead>
-                      <tr className="text-left text-muted-2 text-xs border-b border-line-soft">
-                        {Object.keys(logs[0]).map((k) => (
-                          <th key={k} className="px-4 py-2.5 whitespace-nowrap font-medium">{k}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {logs.map((row, i) => (
-                        <tr key={i} className="border-b border-line-soft/60 hover:bg-panel-2/60">
-                          {Object.entries(row).map(([k, v]) => (
-                            <td key={k} className="px-4 py-2.5 whitespace-nowrap text-muted">
-                              {k.toLowerCase().includes('violation') ? (
-                                <StatusBadge status={v} />
-                              ) : (
-                                String(v)
-                              )}
-                            </td>
+            {result.bikes && result.bikes.length > 0 ? (
+              <BikeDossierPanel bikes={result.bikes} summary={result.summary} csvDownloadUrl={result.csvDownloadUrl} />
+            ) : (
+              <div className="rounded-xl panel-border bg-panel overflow-hidden">
+                <div className="px-5 py-4 border-b border-line-soft font-mono text-sm flex items-center justify-between">
+                  <span>Detection log</span>
+                  <span className="text-muted-2 text-xs">{logs.length} {logs.length === 1 ? 'entry' : 'entries'}</span>
+                </div>
+                {logs.length === 0 ? (
+                  <p className="px-5 py-8 text-sm text-muted text-center">
+                    No structured logs were returned for this run.
+                  </p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm font-mono">
+                      <thead>
+                        <tr className="text-left text-muted-2 text-xs border-b border-line-soft">
+                          {Object.keys(logs[0]).map((k) => (
+                            <th key={k} className="px-4 py-2.5 whitespace-nowrap font-medium">{k}</th>
                           ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+                      </thead>
+                      <tbody>
+                        {logs.map((row, i) => (
+                          <tr key={i} className="border-b border-line-soft/60 hover:bg-panel-2/60">
+                            {Object.entries(row).map(([k, v]) => (
+                              <td key={k} className="px-4 py-2.5 whitespace-nowrap text-muted">
+                                {k.toLowerCase().includes('violation') ? (
+                                  <StatusBadge status={v} />
+                                ) : (
+                                  String(v)
+                                )}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
           </motion.div>
         )}
         </>
