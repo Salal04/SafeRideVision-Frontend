@@ -7,8 +7,8 @@ import {
   Square, Circle, Hexagon, Undo2, Ban,
   ListVideo, ArrowUpDown, RefreshCw,
 } from 'lucide-react'
-import { getSavedApiBase, saveApiBase, runDetection } from '../lib/api.js'
-import BikeDossierPanel from '../components/BikeDossier.jsx'
+import { getSavedApiBase, saveApiBase, runDetection, normalizeBikes, normalizeSummary, resolveUrl, normalizeBase } from '../lib/api.js'
+import VideoAnalysisDetail from '../components/VideoAnalysisDetail.jsx'
 
 const BASE_PIPELINE_STEPS = [
   'Extracting frames',
@@ -118,12 +118,60 @@ function useNgrokVideoBlob(src) {
   return { blobUrl, status }
 }
 
+// Full-screen "View Details" for a video reopened from the results list —
+// same video player + same two-section (Analysis / Bikes) deep-dive as the
+// one shown right after a fresh run, so both places look identical.
+function VideoDetailModal({ v, blobUrl, videoStatus, bikes, summary, csvDownloadUrl, onClose }) {
+  return (
+    <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-start justify-center p-4 sm:p-8 overflow-y-auto">
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="w-full max-w-5xl rounded-xl border border-line bg-panel overflow-hidden my-4"
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-line-soft">
+          <p className="text-sm font-medium truncate pr-4" title={v.original_filename || v.id}>
+            {v.original_filename || v.id}
+          </p>
+          <button onClick={onClose} className="text-muted hover:text-text transition-colors shrink-0">
+            <XCircle size={20} />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-5">
+          {videoStatus === 'ready' ? (
+            <video src={blobUrl} controls className="w-full rounded-lg border border-line-soft max-h-[420px] bg-black" />
+          ) : (
+            <div className="w-full h-56 flex items-center justify-center rounded-lg border border-line-soft bg-black">
+              {videoStatus === 'error' ? (
+                <span className="text-xs text-red flex items-center gap-1.5">
+                  <AlertTriangle size={13} /> Could not load video
+                </span>
+              ) : (
+                <Loader2 size={18} className="animate-spin text-cyan" />
+              )}
+            </div>
+          )}
+
+          <VideoAnalysisDetail bikes={bikes} summary={summary} csvDownloadUrl={csvDownloadUrl} />
+        </div>
+      </motion.div>
+    </div>
+  )
+}
+
 // One card in the "View results" gallery. Pulled out into its own component
 // (instead of inline in the .map()) so useNgrokVideoBlob — a hook — can be
 // called once per video, each with its own loading/ready/error state.
-function VideoCard({ v, resolveVideoUrl }) {
+function VideoCard({ v, resolveVideoUrl, apiBase }) {
   const remoteUrl = resolveVideoUrl(v.output_video_url)
   const { blobUrl, status } = useNgrokVideoBlob(remoteUrl)
+  const [detailOpen, setDetailOpen] = useState(false)
+
+  const base = normalizeBase(apiBase)
+  const bikes = normalizeBikes(v, base)
+  const summary = normalizeSummary(v, bikes)
+  const csvDownloadUrl = resolveUrl(base, v.csv_download_url)
 
   return (
     <div className="rounded-xl panel-border bg-panel overflow-hidden">
@@ -149,25 +197,45 @@ function VideoCard({ v, resolveVideoUrl }) {
           {v.mode === 'junction' && (
             <span>{v.junction_count} junction{v.junction_count === 1 ? '' : 's'}</span>
           )}
-          {v.log_row_count != null && <span>{v.log_row_count} log rows</span>}
+          {bikes.length > 0 && <span>{bikes.length} bikes</span>}
           <span className="flex items-center gap-1">
             <Clock size={11} /> {v.received_at_iso ? new Date(v.received_at_iso).toLocaleString() : '—'}
           </span>
         </div>
-        {status === 'ready' ? (
-          <a
-            href={blobUrl}
-            download={v.original_filename || 'safe-ride-vision-output.mp4'}
-            className="inline-flex items-center gap-1.5 text-xs text-muted hover:text-cyan transition-colors"
+        <div className="flex items-center gap-4">
+          {status === 'ready' ? (
+            <a
+              href={blobUrl}
+              download={v.original_filename || 'safe-ride-vision-output.mp4'}
+              className="inline-flex items-center gap-1.5 text-xs text-muted hover:text-cyan transition-colors"
+            >
+              <Download size={13} /> Download
+            </a>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-2">
+              <Download size={13} /> {status === 'error' ? 'Unavailable' : 'Preparing…'}
+            </span>
+          )}
+          <button
+            onClick={() => setDetailOpen(true)}
+            className="inline-flex items-center gap-1.5 text-xs text-cyan hover:text-cyan/70 transition-colors"
           >
-            <Download size={13} /> Download
-          </a>
-        ) : (
-          <span className="inline-flex items-center gap-1.5 text-xs text-muted-2">
-            <Download size={13} /> {status === 'error' ? 'Unavailable' : 'Preparing…'}
-          </span>
-        )}
+            <ScanSearch size={13} /> View Details
+          </button>
+        </div>
       </div>
+
+      {detailOpen && (
+        <VideoDetailModal
+          v={v}
+          blobUrl={blobUrl}
+          videoStatus={status}
+          bikes={bikes}
+          summary={summary}
+          csvDownloadUrl={csvDownloadUrl}
+          onClose={() => setDetailOpen(false)}
+        />
+      )}
     </div>
   )
 }
@@ -1208,7 +1276,7 @@ export default function Upload() {
             </div>
 
             {result.bikes && result.bikes.length > 0 ? (
-              <BikeDossierPanel bikes={result.bikes} summary={result.summary} csvDownloadUrl={result.csvDownloadUrl} />
+              <VideoAnalysisDetail bikes={result.bikes} summary={result.summary} csvDownloadUrl={result.csvDownloadUrl} />
             ) : (
               <div className="rounded-xl panel-border bg-panel overflow-hidden">
                 <div className="px-5 py-4 border-b border-line-soft font-mono text-sm flex items-center justify-between">
@@ -1303,7 +1371,7 @@ export default function Upload() {
             {videosList.length > 0 && (
               <div className="grid sm:grid-cols-2 gap-4">
                 {videosList.map((v) => (
-                  <VideoCard key={v.id} v={v} resolveVideoUrl={resolveVideoUrl} />
+                  <VideoCard key={v.id} v={v} resolveVideoUrl={resolveVideoUrl} apiBase={apiBase} />
                 ))}
               </div>
             )}
