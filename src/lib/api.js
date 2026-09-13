@@ -24,6 +24,63 @@ function normalizeBase(url) {
   return url.trim().replace(/\/+$/, '')
 }
 
+// Backend hands back relative paths like "/outputs/<video>/bikes/12/plate_crop.jpg"
+// (or, for the main video, sometimes an absolute URL already) — this is the
+// one place that turns either shape into something a browser can actually
+// fetch, so every consumer (video, csv link, bike photo, plate crop) resolves
+// the same way instead of each screen reinventing it slightly differently.
+function resolveUrl(base, path) {
+  if (!path) return null
+  return /^https?:\/\//i.test(path) ? path : `${base}${path.startsWith('/') ? '' : '/'}${path}`
+}
+
+// `bikes` (new, richer field) falls back to deriving the same shape from the
+// older `logs` field, so a backend that hasn't been updated yet still gets a
+// usable — just image-less — dossier per bike instead of nothing.
+function normalizeBikes(data, base) {
+  const source = Array.isArray(data.bikes)
+    ? data.bikes
+    : Array.isArray(data.logs)
+    ? data.logs
+    : []
+
+  return source.map((row) => {
+    const toBool = (v) => v === true || String(v).trim().toLowerCase() === 'true'
+    const everTurned = toBool(row.ever_turned)
+    const signaled = toBool(row.ever_signaled_while_turning)
+    return {
+      trackId: row.track_id,
+      plateNumber: (row.plate_number || '').trim(),
+      plateDetected: toBool(row.plate_detected),
+      mirrorSeenBoth: toBool(row.mirror_seen_both),
+      indicatorSeenBoth: toBool(row.indicator_seen_both),
+      everTurned,
+      signaled,
+      violation: row.violation != null ? Boolean(row.violation) : everTurned && !signaled,
+      bikeImageUrl: resolveUrl(base, row.bike_image_url),
+      plateImageUrl: resolveUrl(base, row.plate_image_url),
+    }
+  })
+}
+
+function normalizeSummary(data, bikes) {
+  if (data.summary) return data.summary
+  // Same fallback spirit as normalizeBikes(): an older backend without a
+  // `summary` block still gets one, computed client-side from `bikes`.
+  const turned = bikes.filter((b) => b.everTurned).length
+  const violations = bikes.filter((b) => b.violation).length
+  const platesRead = bikes.filter((b) => b.plateNumber).length
+  return {
+    total_bikes: bikes.length,
+    turned,
+    signaled_correctly: turned - violations,
+    violations,
+    plates_read: platesRead,
+    plates_missing: bikes.length - platesRead,
+    compliance_rate: turned ? Number(((turned - violations) / turned).toFixed(3)) : null,
+  }
+}
+
 /**
  * Sends the video to the backend and waits as long as it takes.
  * Deliberately does NOT attach any timeout — Colab inference on longer clips
@@ -145,13 +202,16 @@ export async function runDetection(apiBase, file, options = {}) {
     }
 
     const logs = Array.isArray(data.logs) ? data.logs : Array.isArray(data.events) ? data.events : []
+    const bikes = normalizeBikes(data, base)
+    const summary = normalizeSummary(data, bikes)
+    const csvDownloadUrl = resolveUrl(base, data.csv_download_url)
 
-    return { videoUrl, logs, raw: data }
+    return { videoUrl, logs, bikes, summary, csvDownloadUrl, raw: data }
   }
 
   if (contentType.startsWith('video/')) {
     const blob = await response.blob()
-    return { videoUrl: URL.createObjectURL(blob), logs: [], raw: null }
+    return { videoUrl: URL.createObjectURL(blob), logs: [], bikes: [], summary: normalizeSummary({}, []), csvDownloadUrl: null, raw: null }
   }
 
   // Fallback: try to parse as JSON anyway, otherwise surface raw text.
@@ -159,8 +219,11 @@ export async function runDetection(apiBase, file, options = {}) {
   try {
     const data = JSON.parse(text)
     const logs = Array.isArray(data.logs) ? data.logs : []
+    const bikes = normalizeBikes(data, base)
+    const summary = normalizeSummary(data, bikes)
+    const csvDownloadUrl = resolveUrl(base, data.csv_download_url)
     const videoUrl = data.output_video_url || (data.output_video_base64 ? `data:video/mp4;base64,${data.output_video_base64}` : null)
-    return { videoUrl, logs, raw: data }
+    return { videoUrl, logs, bikes, summary, csvDownloadUrl, raw: data }
   } catch {
     throw new Error('Backend responded with an unrecognized format. Check the Colab server output.')
   }
