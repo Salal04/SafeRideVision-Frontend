@@ -6,6 +6,7 @@ import {
   SendHorizontal, ScanSearch, Crop, Check, ArrowLeft,
   Square, Circle, Hexagon, Undo2, Ban,
   ListVideo, ArrowUpDown, RefreshCw,
+  Camera, Radio, StopCircle,
 } from 'lucide-react'
 import { getSavedApiBase, saveApiBase, runDetection, normalizeBikes, normalizeSummary, resolveUrl, normalizeBase } from '../lib/api.js'
 import VideoAnalysisDetail from '../components/VideoAnalysisDetail.jsx'
@@ -296,6 +297,11 @@ export default function Upload() {
   const [junctions, setJunctions] = useState([])
   const [shapeTool, setShapeTool] = useState('rectangle') // 'rectangle' | 'circle' | 'polygon'
   const [polygonPoints, setPolygonPoints] = useState([]) // in-progress polygon vertices, native canvas coords
+  const [captureMode, setCaptureMode] = useState('upload') // 'upload' | 'live'
+  const [liveStatus, setLiveStatus] = useState('idle') // idle | starting | recording | processing
+  const [liveError, setLiveError] = useState('')
+  const [liveElapsed, setLiveElapsed] = useState(0)
+  const [liveFrames, setLiveFrames] = useState(0)
 
   // --- "Upload video" / "View results" tabs ---
   const [activeTab, setActiveTab] = useState('upload') // 'upload' | 'results'
@@ -310,6 +316,16 @@ export default function Upload() {
   const stepTimerRef = useRef(null)
   const fileInputRef = useRef(null)
   const localPreviewUrl = useRef(null)
+  const liveVideoRef = useRef(null)
+  const liveCanvasRef = useRef(null)
+  const liveCameraStreamRef = useRef(null)
+  const liveCaptureStreamRef = useRef(null)
+  const liveRecorderRef = useRef(null)
+  const liveFrameTimerRef = useRef(null)
+  const liveClockTimerRef = useRef(null)
+  const liveFrameCountRef = useRef(0)
+  const liveStartedAtRef = useRef(0)
+  const liveDiscardRef = useRef(false)
 
   const previewVideoRef = useRef(null)
   const frameVideoRef = useRef(null)
@@ -328,6 +344,15 @@ export default function Upload() {
     return () => {
       clearInterval(timerRef.current)
       clearInterval(stepTimerRef.current)
+      clearInterval(liveFrameTimerRef.current)
+      clearInterval(liveClockTimerRef.current)
+      liveDiscardRef.current = true
+      if (liveRecorderRef.current && liveRecorderRef.current.state !== 'inactive') {
+        liveRecorderRef.current.onstop = null
+        liveRecorderRef.current.stop()
+      }
+      liveCameraStreamRef.current?.getTracks().forEach((track) => track.stop())
+      liveCaptureStreamRef.current?.getTracks().forEach((track) => track.stop())
       if (localPreviewUrl.current) URL.revokeObjectURL(localPreviewUrl.current)
     }
   }, [])
@@ -363,6 +388,153 @@ export default function Upload() {
     },
     [handleFile]
   )
+
+  const releaseLiveMedia = useCallback(() => {
+    clearInterval(liveFrameTimerRef.current)
+    clearInterval(liveClockTimerRef.current)
+    liveCameraStreamRef.current?.getTracks().forEach((track) => track.stop())
+    liveCaptureStreamRef.current?.getTracks().forEach((track) => track.stop())
+    liveCameraStreamRef.current = null
+    liveCaptureStreamRef.current = null
+    if (liveVideoRef.current) liveVideoRef.current.srcObject = null
+  }, [])
+
+  const startLiveCapture = async () => {
+    if (!apiBase.trim()) {
+      setLiveError('Set the backend URL before starting camera capture.')
+      setConfigOpen(true)
+      return
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      setLiveError('This browser does not support camera recording. Try a recent Chrome, Edge, or Firefox browser.')
+      return
+    }
+
+    setLiveError('')
+    setLiveElapsed(0)
+    setLiveFrames(0)
+    liveFrameCountRef.current = 0
+    liveDiscardRef.current = false
+    setLiveStatus('starting')
+
+    try {
+      const camera = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+      })
+      liveCameraStreamRef.current = camera
+      const video = liveVideoRef.current
+      const canvas = liveCanvasRef.current
+      if (!video || !canvas) throw new Error('Camera preview is not ready.')
+      video.srcObject = camera
+      await video.play()
+      if (!video.videoWidth || !video.videoHeight) {
+        await new Promise((resolve, reject) => {
+          video.addEventListener('loadedmetadata', resolve, { once: true })
+          video.addEventListener('error', () => reject(new Error('Could not read the camera video.')), { once: true })
+        })
+      }
+
+      const scale = Math.min(1, 1280 / video.videoWidth, 720 / video.videoHeight)
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale))
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale))
+
+      let captureStream
+      try {
+        captureStream = canvas.captureStream(0)
+      } catch {
+        captureStream = canvas.captureStream(3)
+      }
+      let captureTrack = captureStream.getVideoTracks()[0]
+      const manualFrames = typeof captureTrack?.requestFrame === 'function'
+      if (!manualFrames) {
+        captureStream.getTracks().forEach((track) => track.stop())
+        captureStream = canvas.captureStream(3)
+        captureTrack = captureStream.getVideoTracks()[0]
+      }
+      liveCaptureStreamRef.current = captureStream
+
+      const mimeType = typeof MediaRecorder.isTypeSupported === 'function'
+        ? [
+            'video/webm;codecs=vp9',
+            'video/webm;codecs=vp8',
+            'video/webm',
+            'video/mp4',
+          ].find((type) => MediaRecorder.isTypeSupported(type))
+        : undefined
+      const recorder = new MediaRecorder(
+        captureStream,
+        mimeType ? { mimeType, videoBitsPerSecond: 2_500_000 } : undefined
+      )
+      const chunks = []
+      recorder.ondataavailable = (event) => {
+        if (event.data?.size) chunks.push(event.data)
+      }
+      recorder.onerror = () => {
+        setLiveError('Camera recording failed. Check the camera and try again.')
+        liveDiscardRef.current = true
+        try { recorder.stop() } catch { releaseLiveMedia() }
+      }
+      recorder.onstop = async () => {
+        releaseLiveMedia()
+        liveRecorderRef.current = null
+        if (liveDiscardRef.current) {
+          setLiveStatus('idle')
+          return
+        }
+
+        if (liveFrameCountRef.current < 3) {
+          setLiveError('Record for at least one second so the backend receives three frames.')
+          setLiveStatus('idle')
+          return
+        }
+
+        const type = recorder.mimeType || mimeType || 'video/webm'
+        const extension = type.includes('mp4') ? 'mp4' : 'webm'
+        const liveFile = new File(chunks, `safe-ride-live-${Date.now()}.${extension}`, { type })
+        if (!liveFile.size) {
+          setLiveError('The camera did not produce a video clip. Try recording again.')
+          setLiveStatus('idle')
+          return
+        }
+        setLiveStatus('processing')
+        saveApiBase(apiBase)
+        await runPipeline('direct', null, liveFile)
+        setLiveStatus('idle')
+      }
+
+      recorder.start()
+      liveRecorderRef.current = recorder
+      liveStartedAtRef.current = Date.now()
+      const captureFrame = () => {
+        if (!video.videoWidth || !video.videoHeight) return
+        const context = canvas.getContext('2d')
+        context.drawImage(video, 0, 0, canvas.width, canvas.height)
+        if (manualFrames) captureTrack.requestFrame()
+        liveFrameCountRef.current += 1
+        setLiveFrames(liveFrameCountRef.current)
+      }
+      liveFrameTimerRef.current = setInterval(captureFrame, 1000 / 3)
+      liveClockTimerRef.current = setInterval(
+        () => setLiveElapsed(Math.floor((Date.now() - liveStartedAtRef.current) / 1000)),
+        250
+      )
+      setLiveStatus('recording')
+    } catch (err) {
+      releaseLiveMedia()
+      liveRecorderRef.current = null
+      setLiveStatus('idle')
+      setLiveError(err.message || 'Could not open the camera. Allow camera access and try again.')
+    }
+  }
+
+  const stopLiveCapture = () => {
+    const recorder = liveRecorderRef.current
+    if (!recorder || recorder.state === 'inactive') return
+    clearInterval(liveFrameTimerRef.current)
+    clearInterval(liveClockTimerRef.current)
+    recorder.stop()
+  }
 
   // ---------- Junction frame picking / box drawing ----------
 
@@ -698,13 +870,13 @@ export default function Upload() {
 
   // ---------- Submission ----------
 
-  const runPipeline = async (activeMode, jData) => {
+  const runPipeline = async (activeMode, jData, inputFile = file) => {
     if (!apiBase.trim()) {
       setError('Paste your ngrok backend URL above before running detection.')
       setConfigOpen(true)
       return
     }
-    if (!file) return
+    if (!inputFile) return
 
     saveApiBase(apiBase)
     setStatus('processing')
@@ -725,7 +897,7 @@ export default function Upload() {
     )
 
     try {
-      const res = await runDetection(apiBase, file, {
+      const res = await runDetection(apiBase, inputFile, {
         signal: controller.signal,
         mode: activeMode,
         ...(activeMode === 'junction' && jData && jData.length > 0
@@ -746,6 +918,7 @@ export default function Upload() {
         setStatus('idle')
       } else {
         setError(err.message || 'Something went wrong while processing the video.')
+        if (inputFile !== file) setLiveError(err.message || 'Live capture processing failed.')
         setStatus('error')
       }
     }
@@ -853,12 +1026,12 @@ export default function Upload() {
           <FileVideo size={12} /> RUN DETECTION
         </span>
         <h1 className="font-display font-semibold text-4xl sm:text-5xl tracking-tight">
-          Upload a clip, get a verdict
+          Capture live or upload a clip
         </h1>
         <p className="text-muted mt-5 max-w-xl mx-auto leading-relaxed">
-          The video is sent to the detection backend running on Colab. Longer
-          clips take longer to process — keep this tab open and it will
-          come back with the annotated video and a full compliance log.
+          Upload a clip or capture from your camera at 3 frames per second.
+          Live clips are analyzed after you stop recording. Keep this tab open
+          while the backend creates the annotated video and compliance log.
         </p>
       </section>
 
@@ -877,11 +1050,12 @@ export default function Upload() {
           </button>
           <button
             onClick={switchToResults}
+            disabled={liveStatus === 'starting' || liveStatus === 'recording' || liveStatus === 'processing'}
             className={`flex-1 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-mono border transition-colors ${
               activeTab === 'results'
                 ? 'bg-cyan/10 text-cyan border-cyan/30'
                 : 'text-muted border-transparent hover:text-text'
-            }`}
+            } disabled:opacity-40 disabled:cursor-not-allowed`}
           >
             <ListVideo size={15} /> View results
           </button>
@@ -933,8 +1107,29 @@ export default function Upload() {
 
         {activeTab === 'upload' && (
         <>
+        <div className="flex items-center gap-2 rounded-xl panel-border bg-panel p-1.5">
+          <button
+            onClick={() => setCaptureMode('upload')}
+            disabled={liveStatus !== 'idle' || status === 'processing'}
+            className={`flex-1 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-mono border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+              captureMode === 'upload' ? 'bg-cyan/10 text-cyan border-cyan/30' : 'text-muted border-transparent hover:text-text'
+            }`}
+          >
+            <UploadCloud size={15} /> Upload a clip
+          </button>
+          <button
+            onClick={() => setCaptureMode('live')}
+            disabled={liveStatus !== 'idle' || status === 'processing'}
+            className={`flex-1 inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-mono border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
+              captureMode === 'live' ? 'bg-cyan/10 text-cyan border-cyan/30' : 'text-muted border-transparent hover:text-text'
+            }`}
+          >
+            <Camera size={15} /> Live camera
+          </button>
+        </div>
+
         {/* Dropzone */}
-        {!file && (
+        {captureMode === 'upload' && !file && (
           <div
             onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
             onDragLeave={() => setDragOver(false)}
@@ -961,7 +1156,7 @@ export default function Upload() {
           </div>
         )}
 
-        {error && (
+        {captureMode === 'upload' && error && (
           <div className="flex items-start gap-2.5 rounded-lg border border-red/30 bg-red/5 px-4 py-3 text-sm text-red">
             <AlertTriangle size={16} className="mt-0.5 shrink-0" />
             <span>{error}</span>
@@ -969,7 +1164,7 @@ export default function Upload() {
         )}
 
         {/* Selected file + mode choice + preview */}
-        {file && status === 'idle' && (
+        {captureMode === 'upload' && file && status === 'idle' && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-xl panel-border bg-panel p-5">
             <div className="flex items-center gap-3 mb-4">
               <FileVideo size={18} className="text-cyan shrink-0" />
@@ -1203,6 +1398,78 @@ export default function Upload() {
                 )}
               </div>
             )}
+          </motion.div>
+        )}
+
+        {captureMode === 'live' && (
+          <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="rounded-xl panel-border bg-panel p-5">
+            <div className="flex items-center justify-between gap-3 mb-4">
+              <div>
+                <h2 className="flex items-center gap-2 font-mono text-sm">
+                  <Camera size={16} className="text-cyan" /> Live camera capture
+                </h2>
+                <p className="text-xs text-muted-2 mt-1.5">
+                  Captures 3 frames per second. Stop the recording to send it to the backend for analysis.
+                </p>
+              </div>
+              {liveStatus === 'recording' && (
+                <span className="inline-flex items-center gap-1.5 rounded-full border border-red/40 bg-red/10 px-2.5 py-1 font-mono text-[11px] text-red shrink-0">
+                  <span className="h-1.5 w-1.5 rounded-full bg-red animate-pulse" /> LIVE · 3 FPS
+                </span>
+              )}
+            </div>
+
+            <div className="relative overflow-hidden rounded-lg border border-line-soft bg-black aspect-video">
+              <video ref={liveVideoRef} autoPlay muted playsInline className="w-full h-full object-contain" />
+              <canvas ref={liveCanvasRef} className="hidden" />
+              {liveStatus !== 'recording' && liveStatus !== 'starting' && (
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/70 text-center px-5">
+                  <Camera size={24} className="text-muted-2" />
+                  <span className="text-xs text-muted-2">Camera preview appears here when capture starts.</span>
+                </div>
+              )}
+              {liveStatus === 'starting' && (
+                <div className="absolute inset-0 flex items-center justify-center bg-black/60">
+                  <Loader2 size={22} className="animate-spin text-cyan" />
+                </div>
+              )}
+            </div>
+
+            {liveError && (
+              <div className="mt-3 flex items-start gap-2 rounded-lg border border-red/30 bg-red/5 px-3.5 py-3 text-sm text-red">
+                <AlertTriangle size={15} className="mt-0.5 shrink-0" /> <span>{liveError}</span>
+              </div>
+            )}
+
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              {liveStatus === 'recording' ? (
+                <>
+                  <button
+                    onClick={stopLiveCapture}
+                    className="inline-flex items-center gap-2 rounded-md bg-red px-4 py-2.5 text-sm font-semibold text-white hover:bg-red/80 transition-colors"
+                  >
+                    <StopCircle size={16} /> Stop and analyze
+                  </button>
+                  <span className="inline-flex items-center gap-1.5 font-mono text-xs text-muted-2">
+                    <Clock size={13} /> {formatTime(liveElapsed)}
+                  </span>
+                  <span className="font-mono text-xs text-muted-2">{liveFrames} frames captured</span>
+                </>
+              ) : liveStatus === 'starting' || liveStatus === 'processing' ? (
+                <span className="inline-flex items-center gap-2 rounded-md border border-line px-4 py-2.5 text-sm text-muted">
+                  <Loader2 size={15} className="animate-spin text-cyan" />
+                  {liveStatus === 'starting' ? 'Opening camera…' : 'Preparing live clip…'}
+                </span>
+              ) : (
+                <button
+                  onClick={startLiveCapture}
+                  disabled={status === 'processing'}
+                  className="inline-flex items-center gap-2 rounded-md bg-cyan px-4 py-2.5 text-sm font-semibold text-asphalt hover:bg-cyan/80 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Radio size={16} /> Start live capture
+                </button>
+              )}
+            </div>
           </motion.div>
         )}
 
